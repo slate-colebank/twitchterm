@@ -1,8 +1,9 @@
 use std::{
-    io::{stdout, Result},
-    env,
-    process,
-    thread, time::Duration, sync::mpsc,  // thread things
+    env, io::{stdout, Result}, process, sync::{
+        Arc,
+        Mutex,
+        mpsc,
+    }, thread
 };
 
 use ratatui::{
@@ -10,16 +11,13 @@ use ratatui::{
         event::{self, KeyCode, KeyEventKind},
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
         ExecutableCommand,
-    }, layout::Rect, style::Stylize, text::ToSpan, widgets::{Block, Borders, List, ListDirection, ListItem, Paragraph, Wrap}, Terminal
+    }, layout::Rect, style::Stylize, text::ToSpan, widgets::{Block, Borders, List, ListDirection, Paragraph, Wrap}, Terminal
 };
 
-use tokio::sync::Mutex;
+// use tokio::sync::Mutex;
+use tokio::time::{sleep, Duration};
 use twitch_irc::{
-    login::StaticLoginCredentials,
-    TwitchIRCClient,
-    ClientConfig,
-    SecureTCPTransport,
-    message::ServerMessage,
+    login::StaticLoginCredentials, message::{PrivmsgMessage, ServerMessage}, ClientConfig, SecureTCPTransport, TwitchIRCClient
 };
 
 #[tokio::main]
@@ -34,38 +32,43 @@ pub async fn main() -> Result<()> {
     let channel_name = args[1].clone();
     println!("Now reading from {}...", channel_name);
 
+    // initialize send receive
+    // let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::channel::<PrivmsgMessage>();
+
+
     // initialize terminal
     stdout().execute(EnterAlternateScreen)?;
     enable_raw_mode()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     terminal.clear()?;
 
-    // initialize send receive
-    let (tx, rx) = mpsc::channel();
-
-    let mut chats = Vec::new();
-    let channel_name_term_clone = channel_name.clone();
+    // initialize chats list
 
     // main terminal loop
-    let terminal_handler = thread::spawn(move || {
+    let channel_name_title = channel_name.clone();
+    let terminal_handle = tokio::spawn(async move {
+        let mut chats = Vec::new();
         loop {
-            let received = rx.recv().unwrap();
-            chats.push(received);
-            if let Err(e) = terminal.draw(|frame| {
+            while let Ok(received) = rx.try_recv() {
+                // chats.insert(0, received.channel_login + ":".to_string() + received.message_text);
+                chats.insert(0, format!("{} : {}", received.sender.name, received.message_text));
+            }
+            terminal.draw(|frame| {
                 let title = format!("{}{}{}",
                     "TwitchTerm - ",
-                    channel_name_term_clone,
+                    channel_name_title,
                     " - type 'q' to quit");
                 //let outer_border = Block::default().title("TwitchTerm - {} - Type 'q' to quit").borders(Borders::ALL);
                 let outer_border = Block::default().title(title).borders(Borders::ALL);
                 let outer_area = frame.size();
 
-                chats.push("test".to_string());
+                // let chats_clone = chats.clone();
+                
+                // chats.push("test".to_string());
                 let msg_list = List::new(chats.clone())
                     .direction(ListDirection::BottomToTop);
                 let msg_list_area = Rect::new(1, 1, frame.size().width - 2, frame.size().height - 2);
-
-
 
                 frame.render_widget(outer_border, outer_area);
                 // frame.render_widget(inner_text, inner_text_area);
@@ -73,24 +76,16 @@ pub async fn main() -> Result<()> {
                 frame.render_widget(msg_list, msg_list_area);
 
 
-            }) {
-                println!("Error: could not draw to terminal");
-                process::exit(1);
-            }
+            }).unwrap();
 
-            if let Err(e) = event::poll(std::time::Duration::from_millis(16)) {
-                println!("Error handling poll event");
-                process::exit(1);
-            } else {
-                if let Ok(event::Event::Key(key)) = event::read() {
+            if event::poll(std::time::Duration::from_millis(16)).unwrap() {
+                if let event::Event::Key(key) = event::read().unwrap() {
                     if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') {
                         break;
                     }
                 }
-
             }
         }
-
     });
 
     // join twitch chat
@@ -98,28 +93,31 @@ pub async fn main() -> Result<()> {
     let (mut incoming_messages, client) =
         TwitchIRCClient::<SecureTCPTransport, StaticLoginCredentials>::new(config);
 
-    // main twitch loop
-    let join_handle = tokio::spawn(async move {
+    let twitch_handler = tokio::spawn(async move {
         while let Some(message) = incoming_messages.recv().await {
-            // println!("Received message: {:?}", message);
             match message {
-                ServerMessage::Privmsg(message) => {
-                    tx.send(message.message_text);
-                }
-
-                _ => {}
-
+                 ServerMessage::Privmsg(msg) => {
+                    //tx.send(msg.message_text);
+                    tx.send(msg);
+                 },
+                 _ => {}
             }
         }
+        /*
+        for _ in 0..5 {
+            tx.send("sent".to_string());
+            sleep(Duration::from_secs(1)).await;
+        }
+*/
     });
 
-
     client.join(channel_name.to_owned()).unwrap();
-    terminal_handler.join().unwrap();
 
-    join_handle.await.unwrap();
+
+    terminal_handle.await.unwrap();
+    // twitch_handler.await.unwrap();
+
     stdout().execute(LeaveAlternateScreen)?;
     disable_raw_mode()?;
-
     Ok(())
 }
